@@ -3,6 +3,7 @@ import networkx as nx
 import plotly.graph_objects as go
 import pandas as pd
 import copy
+import time
 
 # 페이지 설정
 st.set_page_config(
@@ -100,18 +101,73 @@ subway_weighted_map = {
 }
 '''
 
-# 서울 지하철 지리적 기준 사전 정의 2D 좌표 (시각적 현실감 제공)
-DEFAULT_POSITIONS = {
-    "시청": (0.0, 0.4),
-    "동대문": (0.7, 0.5),
-    "용산": (-0.1, -0.2),
-    "신도림": (-0.9, -0.4),
-    "강남": (0.4, -0.8),
-    "잠실": (1.1, -0.7)
+# 서울 실제 지리적 방위각 기반 정밀 2D 좌표 프리셋 (확장 8개 역 포함)
+GEO_COORDINATES = {
+    "홍대": (-0.85, 0.25),
+    "신촌": (-0.45, 0.35),
+    "시청": (0.0, 0.35),
+    "동대문": (0.65, 0.40),
+    "신도림": (-0.85, -0.35),
+    "용산": (-0.15, -0.10),
+    "강남": (0.35, -0.55),
+    "잠실": (0.85, -0.45)
 }
 
 # ------------------------------------------------------------------------------
-# 3. 파이썬 코드 파싱 및 그래프 변환 함수
+# 3. 레이아웃 알고리즘 함수 (교차 최소화 & 깨끗한 그래프 배치)
+# ------------------------------------------------------------------------------
+def compute_graph_layout(G: nx.Graph, layout_mode: str = "kamada_kawai"):
+    """
+    그래프 시각화의 교차를 최소화하고 균형 잡힌 노드 좌표를 계산합니다.
+    - kamada_kawai: 그래프 최단 경로 거리 기반 스프링 에너지 최소화 (가장 깔끔하고 교차 적음)
+    - spring: Fruchterman-Reingold 힘 지향 물리력 기반 분산 배치
+    - geographic: 서울 실제 지리적 방위각 기반 정밀 배치
+    - circular: 원형 둘레 균등 분산 배치
+    """
+    nodes = list(G.nodes())
+    n = len(nodes)
+    if n == 0:
+        return {}
+
+    # 1. 서울 실제 지리적 배치
+    if layout_mode == "geographic":
+        if all(node in GEO_COORDINATES for node in nodes):
+            return {node: GEO_COORDINATES[node] for node in nodes}
+        pos = {}
+        fixed_nodes = []
+        for node in nodes:
+            if node in GEO_COORDINATES:
+                pos[node] = GEO_COORDINATES[node]
+                fixed_nodes.append(node)
+        if len(fixed_nodes) == n:
+            return pos
+        if len(fixed_nodes) > 0:
+            try:
+                return nx.spring_layout(G, pos=pos, fixed=fixed_nodes, seed=42, k=1.2)
+            except Exception:
+                pass
+
+    # 2. 원형 배치 (Circular / Ring)
+    if layout_mode == "circular":
+        return nx.circular_layout(G)
+
+    # 3. 카마다-카와이 알고리즘 (Kamada-Kawai: 교차 최소화 & 대칭 균형 최고)
+    if layout_mode == "kamada_kawai":
+        try:
+            if nx.is_connected(G):
+                return nx.kamada_kawai_layout(G, weight="weight")
+            else:
+                return nx.spring_layout(G, seed=42, k=1.8 / (n ** 0.5), iterations=150)
+        except Exception:
+            pass
+
+    # 4. 스프링 포스 알고리즘 (Fruchterman-Reingold)
+    k_optimal = max(0.8, 2.0 / (n ** 0.5))
+    return nx.spring_layout(G, seed=42, k=k_optimal, iterations=200)
+
+
+# ------------------------------------------------------------------------------
+# 4. 파이썬 코드 파싱 및 그래프 변환 함수
 # ------------------------------------------------------------------------------
 def parse_python_graph_code(code_str: str):
     """
@@ -146,7 +202,7 @@ def parse_python_graph_code(code_str: str):
 
 
 # ------------------------------------------------------------------------------
-# 4. 단계별(Step-by-Step) 알고리즘 트래커
+# 5. 단계별(Step-by-Step) 알고리즘 트래커
 # ------------------------------------------------------------------------------
 def trace_dfs(graph, start_station):
     """DFS의 각 단계(Stack 상태, 방문 노드, 현재 노드)를 기록"""
@@ -360,7 +416,7 @@ def trace_dijkstra(graph_weighted, start_station, end_station):
 
 
 # ------------------------------------------------------------------------------
-# 5. Plotly 그래프 렌더러
+# 6. Plotly 고해상도 깔끔 그래프 렌더러
 # ------------------------------------------------------------------------------
 def create_graph_figure(
     graph,
@@ -371,9 +427,10 @@ def create_graph_figure(
     queue_or_stack_nodes=None,
     start_node=None,
     end_node=None,
-    title="지하철 노선망 그래프"
+    title="지하철 노선망 그래프",
+    layout_mode="kamada_kawai"
 ):
-    """Plotly를 이용해 고해상도 인터랙티브 네트워크 시각화 생성"""
+    """Plotly를 이용해 겹침 없이 깔끔한 네트워크 시각화 생성"""
     G = nx.Graph()
     for u, neighbors in weighted_map.items():
         for item in neighbors:
@@ -383,25 +440,13 @@ def create_graph_figure(
                 v, w = item, 10
             G.add_edge(u, v, weight=w)
 
-    # 노드 좌표 결정 (기본 지하철역은 사전 정의, 새로운 노드는 spring_layout)
-    pos = {}
-    remaining_nodes = []
-    for node in G.nodes():
-        if node in DEFAULT_POSITIONS:
-            pos[node] = DEFAULT_POSITIONS[node]
-        else:
-            remaining_nodes.append(node)
-
-    if remaining_nodes:
-        spring_pos = nx.spring_layout(G, seed=42, k=0.6)
-        for node in remaining_nodes:
-            pos[node] = spring_pos[node]
+    pos = compute_graph_layout(G, layout_mode)
 
     # 기본 간선 그리기
     edge_x = []
     edge_y = []
 
-    for u, v, d in G.edges(data=True):
+    for u, v in G.edges():
         x0, y0 = pos[u]
         x1, y1 = pos[v]
         edge_x.extend([x0, x1, None])
@@ -409,12 +454,12 @@ def create_graph_figure(
 
     edge_trace = go.Scatter(
         x=edge_x, y=edge_y,
-        line=dict(width=2.5, color='#94A3B8'),
+        line=dict(width=2.8, color='#94A3B8'),
         hoverinfo='none',
         mode='lines'
     )
 
-    # 하이라이트 간선 (경로)
+    # 하이라이트 간선 (최단 경로 등)
     hl_edge_x = []
     hl_edge_y = []
     if highlight_edges:
@@ -431,30 +476,43 @@ def create_graph_figure(
 
     hl_edge_trace = go.Scatter(
         x=hl_edge_x, y=hl_edge_y,
-        line=dict(width=6, color='#EF4444'),
+        line=dict(width=6.5, color='#EF4444'),
         hoverinfo='none',
         mode='lines'
     )
 
-    # 간선 가중치 텍스트 표시
-    edge_label_x = []
-    edge_label_y = []
-    edge_label_text = []
+    # 간선 가중치 배지 어노테이션
+    annotations = []
     for u, v, d in G.edges(data=True):
         x0, y0 = pos[u]
         x1, y1 = pos[v]
-        edge_label_x.append((x0 + x1) / 2)
-        edge_label_y.append((y0 + y1) / 2)
-        edge_label_text.append(f"<b>{d.get('weight', '')}분</b>")
+        mid_x = (x0 + x1) / 2
+        mid_y = (y0 + y1) / 2
+        weight_val = d.get('weight', '')
+        
+        is_hl = False
+        if highlight_edges:
+            for hu, hv in highlight_edges:
+                if (u == hu and v == hv) or (u == hv and v == hu):
+                    is_hl = True
+                    break
 
-    edge_label_trace = go.Scatter(
-        x=edge_label_x, y=edge_label_y,
-        mode='text',
-        text=edge_label_text,
-        textposition='middle center',
-        textfont=dict(size=12, color='#1E293B'),
-        hoverinfo='none'
-    )
+        annotations.append(dict(
+            x=mid_x,
+            y=mid_y,
+            text=f"<b>{weight_val}분</b>",
+            showarrow=False,
+            font=dict(
+                size=11, 
+                color='#DC2626' if is_hl else '#1E293B',
+                family='Pretendard, sans-serif'
+            ),
+            bgcolor='rgba(255, 255, 255, 0.95)',
+            bordercolor='#EF4444' if is_hl else '#CBD5E1',
+            borderwidth=1.5 if is_hl else 1,
+            borderpad=3,
+            opacity=0.98
+        ))
 
     # 노드 색상 및 크기 결정
     node_x = []
@@ -472,37 +530,36 @@ def create_graph_figure(
         x, y = pos[node]
         node_x.append(x)
         node_y.append(y)
-        node_text.append(node)
+        node_text.append(f"<b>{node}</b>")
 
-        # 상태별 우선순위 색상 적용
         if node == current_node:
-            node_colors.append('#F59E0B')      # 현재 방문 노드: 진한 주황/앰버
-            node_sizes.append(42)
+            node_colors.append('#F59E0B')      # 현재 방문 노드: 밝은 주황
+            node_sizes.append(44)
             node_borders.append('#78350F')
             node_border_widths.append(4)
         elif node == start_node:
             node_colors.append('#8B5CF6')      # 출발역: 보라색
-            node_sizes.append(38)
+            node_sizes.append(40)
             node_borders.append('#4C1D95')
-            node_border_widths.append(3)
+            node_border_widths.append(3.5)
         elif node == end_node and (highlight_edges or node in highlight_nodes):
             node_colors.append('#10B981')      # 목적지 달성: 에메랄드 그린
-            node_sizes.append(38)
+            node_sizes.append(40)
             node_borders.append('#064E3B')
-            node_border_widths.append(3)
+            node_border_widths.append(3.5)
         elif node in highlight_nodes:
             node_colors.append('#3B82F6')      # 방문 완료 / 최단 경로: 파란색
-            node_sizes.append(34)
+            node_sizes.append(36)
             node_borders.append('#1E3A8A')
-            node_border_widths.append(2)
+            node_border_widths.append(2.5)
         elif node in queue_or_stack_nodes:
             node_colors.append('#FCD34D')      # 큐/스택 대기 중: 밝은 노랑
-            node_sizes.append(32)
+            node_sizes.append(34)
             node_borders.append('#B45309')
-            node_border_widths.append(2)
+            node_border_widths.append(2.5)
         else:
-            node_colors.append('#FFFFFF')      # 미방문: 흰색
-            node_sizes.append(30)
+            node_colors.append('#FFFFFF')      # 미방문: 깔끔한 흰색
+            node_sizes.append(32)
             node_borders.append('#64748B')
             node_border_widths.append(2)
 
@@ -521,24 +578,130 @@ def create_graph_figure(
     )
 
     fig = go.Figure(
-        data=[edge_trace, hl_edge_trace, edge_label_trace, node_trace],
+        data=[edge_trace, hl_edge_trace, node_trace],
         layout=go.Layout(
-            title=dict(text=title, font=dict(size=17, color='#1E293B')),
+            title=dict(text=title, font=dict(size=17, color='#1E293B', family='Pretendard, sans-serif')),
             showlegend=False,
             hovermode='closest',
+            annotations=annotations,
             margin=dict(b=40, l=40, r=40, t=50),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             plot_bgcolor='#F8FAFC',
             paper_bgcolor='#FFFFFF',
-            height=480
+            height=490
         )
     )
     return fig
 
 
 # ------------------------------------------------------------------------------
-# 6. 메인 대시보드 레이아웃
+# 7. 단일 스텝 뷰 렌더링 헬퍼 함수
+# ------------------------------------------------------------------------------
+def render_traversal_step(step, total_steps, algo_choice, graph, weighted_map, start_station, layout_mode):
+    """DFS / BFS의 단일 스텝에 대한 상태 배지, 그래프, 자료구조 뷰를 렌더링"""
+    badge_class = "badge-dfs" if "DFS" in algo_choice else "badge-bfs"
+    badge_name = "DFS (스택 / LIFO)" if "DFS" in algo_choice else "BFS (큐 / FIFO)"
+    ds_label = "📦 현재 스택 (Stack) 상태 [맨 뒤가 TOP]" if "DFS" in algo_choice else "🚶 현재 큐 (Queue) 상태 [맨 앞이 FRONT]"
+
+    st.markdown(
+        f'<span class="algo-badge {badge_class}">{badge_name}</span> <b>단계 {step["step_num"]} / {total_steps-1}</b>: '
+        f'{step["action"]}',
+        unsafe_allow_html=True
+    )
+
+    col_g, col_ds = st.columns([7, 5])
+
+    with col_g:
+        cur_node = step.get("current")
+        vis_nodes = step.get("visited", [])
+        ds_items = step.get("stack") if "DFS" in algo_choice else step.get("queue", [])
+        hl_edges = step.get("highlight_edges", [])
+
+        fig = create_graph_figure(
+            graph=graph,
+            weighted_map=weighted_map,
+            highlight_nodes=vis_nodes,
+            current_node=cur_node,
+            highlight_edges=hl_edges,
+            queue_or_stack_nodes=ds_items,
+            start_node=start_station,
+            title=f"{algo_choice} 탐색 진행도 (현재: {cur_node or '대기'})",
+            layout_mode=layout_mode
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col_ds:
+        st.markdown(f"#### {ds_label}")
+        if ds_items:
+            ds_str = " ➔ ".join([f"[{item}]" for item in ds_items])
+            st.markdown(f'<div class="ds-box">{ds_str}</div>', unsafe_allow_html=True)
+            if "DFS" in algo_choice:
+                st.caption(f"👉 다음 꺼낼 역: **`{ds_items[-1]}`** (`stack.pop()` 실행)")
+            else:
+                st.caption(f"👉 다음 꺼낼 역: **`{ds_items[0]}`** (`queue.pop(0)` 실행)")
+        else:
+            st.markdown('<div class="ds-box">(비어 있음)</div>', unsafe_allow_html=True)
+
+        st.markdown("#### 🏁 방문 순서 (Visited)")
+        if vis_nodes:
+            vis_str = " ➔ ".join([f"**{i+1}. {stn}**" for i, stn in enumerate(vis_nodes)])
+            st.markdown(f'<div class="step-log">{vis_str}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="step-log">(아직 방문한 역 없음)</div>', unsafe_allow_html=True)
+
+
+def render_dijkstra_step(step, total_steps, d_start, d_end, d_final_path, d_total_time, graph, weighted_map, stations, layout_mode):
+    """다익스트라 단일 스텝에 대한 상태 배지, 그래프, 테이블 뷰를 렌더링"""
+    step_idx = step["step_num"]
+    is_last = (step_idx == total_steps - 1)
+
+    st.markdown(
+        f'<span class="algo-badge badge-dijkstra">다익스트라</span> <b>단계 {step_idx} / {total_steps-1}</b>: '
+        f'{step["action"]}',
+        unsafe_allow_html=True
+    )
+
+    col_dg, col_dt = st.columns([7, 5])
+
+    with col_dg:
+        hl_path = d_final_path if is_last else step["visited"]
+        hl_edges = [(d_final_path[i], d_final_path[i+1]) for i in range(len(d_final_path)-1)] if is_last and d_final_path else []
+
+        fig_d = create_graph_figure(
+            graph=graph,
+            weighted_map=weighted_map,
+            highlight_nodes=hl_path,
+            current_node=step["current"],
+            highlight_edges=hl_edges,
+            queue_or_stack_nodes=step.get("updated_stations", []),
+            start_node=d_start,
+            end_node=d_end,
+            title=f"다익스트라 최단 경로 탐색 ({d_start} ➔ {d_end})",
+            layout_mode=layout_mode
+        )
+        st.plotly_chart(fig_d, use_container_width=True)
+
+    with col_dt:
+        st.markdown("#### ⏱️ 역별 최소 소요 시간 (`times`) & 직전 역 (`previous`)")
+        df_records = []
+        for stn in stations:
+            t_val = step["times"].get(stn, 999999)
+            t_str = f"{t_val}분" if t_val < 999999 else "∞ (미도달)"
+            prev_val = step["previous"].get(stn) or "-"
+            status = "🟢 확정(방문완료)" if stn in step["visited"] else ("🟡 이번 단계 갱신" if stn in step["updated_stations"] else "⚪ 미확정")
+            df_records.append({"지하철역": stn, "최소 시간": t_str, "직전 경유역": prev_val, "상태": status})
+
+        df = pd.DataFrame(df_records)
+        st.dataframe(df, hide_index=True, use_container_width=True)
+
+        if is_last and d_final_path:
+            st.success(f"🎯 **최종 최단 경로:** {' ➔ '.join(d_final_path)} (총 **{d_total_time}분** 소요)")
+            st.info(f"💡 **역추적 원리:** 도착역 `{d_end}`에서부터 `previous` 딕셔너리를 거슬러 올라가 출발역 `{d_start}`까지 도달한 뒤 뒤집어(`reversed`) 경로를 구합니다.")
+
+
+# ------------------------------------------------------------------------------
+# 8. 메인 대시보드 레이아웃
 # ------------------------------------------------------------------------------
 def main():
     st.markdown('<div class="main-title">🚇 지하철 노선망 탐색 알고리즘 시각화</div>', unsafe_allow_html=True)
@@ -548,10 +711,30 @@ def main():
     # 사이드바: 파이썬 코드 입력창 & 그래프 커스터마이징
     # --------------------------------------------------------------------------
     with st.sidebar:
-        st.header("⚙️ 그래프 정의 (파이썬 코드)")
-        st.caption("파이썬 딕셔너리 코드를 직접 수정하여 새로운 노선망을 만들 수 있습니다.")
+        st.header("⚙️ 그래프 정의 & 레이아웃")
+        
+        layout_choice = st.selectbox(
+            "📐 노선도 배치 알고리즘",
+            [
+                "🎯 카마다-카와이 (교차 최소화 & 균형 배치)",
+                "🗺️ 서울 지하철 지리 배치 (실제 방위각 정렬)",
+                "⚖️ 스프링 포스 (힘 지향 물리 분산)",
+                "⭕ 원형 순환선 (Circular / Ring)"
+            ],
+            index=0,
+            help="선이 꼬이지 않도록 그래프의 최적 위치를 계산하는 알고리즘을 선택합니다."
+        )
 
-        # 프리셋 선택
+        layout_map = {
+            "🎯 카마다-카와이 (교차 최소화 & 균형 배치)": "kamada_kawai",
+            "🗺️ 서울 지하철 지리 배치 (실제 방위각 정렬)": "geographic",
+            "⚖️ 스프링 포스 (힘 지향 물리 분산)": "spring",
+            "⭕ 원형 순환선 (Circular / Ring)": "circular"
+        }
+        selected_layout_mode = layout_map[layout_choice]
+
+        st.divider()
+
         preset = st.selectbox(
             "📋 예제 프리셋 불러오기",
             ["기본 6개 역 (search.py)", "확장 8개 역 노선망 (신촌·홍대 추가)"]
@@ -559,35 +742,34 @@ def main():
 
         preset_code = DEFAULT_PYTHON_CODE
         if preset == "확장 8개 역 노선망 (신촌·홍대 추가)":
-            preset_code = '''# 확장 8개 역 노선망
+            preset_code = '''# 확장 8개 역 노선망 (실제 순환/환승망 연결)
 subway_graph = {
-    "시청": ["신도림", "동대문", "용산", "강남", "신촌"],
-    "신도림": ["시청", "동대문", "홍대"],
-    "동대문": ["시청", "신도림", "강남", "잠실"],
-    "용산": ["시청", "강남"],
-    "강남": ["시청", "동대문", "용산", "잠실"],
-    "잠실": ["동대문", "강남"],
+    "시청": ["신촌", "동대문", "용산", "강남"],
     "신촌": ["시청", "홍대"],
-    "홍대": ["신촌", "신도림"]
+    "홍대": ["신촌", "신도림"],
+    "신도림": ["홍대", "용산", "동대문"],
+    "동대문": ["시청", "신도림", "강남", "잠실"],
+    "용산": ["시청", "신도림", "강남"],
+    "강남": ["시청", "동대문", "용산", "잠실"],
+    "잠실": ["동대문", "강남"]
 }
 
 subway_weighted_map = {
-    "시청": [("신도림", 12), ("동대문", 10), ("용산", 8), ("강남", 15), ("신촌", 7)],
-    "신도림": [("시청", 12), ("동대문", 14), ("홍대", 6)],
-    "동대문": [("시청", 10), ("신도림", 14), ("강남", 13), ("잠실", 11)],
-    "용산": [("시청", 8), ("강남", 9)],
-    "강남": [("시청", 15), ("동대문", 13), ("용산", 9), ("잠실", 10)],
-    "잠실": [("동대문", 11), ("강남", 10)],
+    "시청": [("신촌", 7), ("동대문", 10), ("용산", 8), ("강남", 15)],
     "신촌": [("시청", 7), ("홍대", 5)],
-    "홍대": [("신촌", 5), ("신도림", 6)]
+    "홍대": [("신촌", 5), ("신도림", 6)],
+    "신도림": [("홍대", 6), ("용산", 9), ("동대문", 14)],
+    "동대문": [("시청", 10), ("신도림", 14), ("강남", 13), ("잠실", 11)],
+    "용산": [("시청", 8), ("신도림", 9), ("강남", 9)],
+    "강남": [("시청", 15), ("동대문", 13), ("용산", 9), ("잠실", 10)],
+    "잠실": [("동대문", 11), ("강남", 10)]
 }
 '''
 
-        # 코드 편집 텍스트 영역
         code_input = st.text_area(
             "파이썬 코드 편집:",
             value=preset_code,
-            height=320,
+            height=300,
             help="subway_graph 와 subway_weighted_map 딕셔너리를 정의해주세요."
         )
 
@@ -617,105 +799,125 @@ subway_weighted_map = {
     ])
 
     # ==========================================================================
-    # TAB 1: DFS vs BFS 단계별 탐색 (스택 & 큐 내부 상태 시각화)
+    # TAB 1: DFS vs BFS 단계별 탐색 (스택 & 큐 내부 상태 시각화 & 애니메이션)
     # ==========================================================================
     with tab1:
         st.subheader("🔍 깊이 우선(DFS) & 너비 우선(BFS) 단계별 탐색 시뮬레이션")
-        st.caption("자료구조(스택 LIFO vs 큐 FIFO)에 따라 방문 순서가 어떻게 달라지는지 단계별로 확인해보세요.")
+        st.caption("자료구조(스택 LIFO vs 큐 FIFO)에 따라 방문 순서가 어떻게 달라지는지 애니메이션으로 확인해보세요.")
 
-        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([2, 2, 4])
+        col_ctrl1, col_ctrl2 = st.columns([3, 3])
         with col_ctrl1:
-            algo_choice = st.radio("탐색 알고리즘 선택", ["DFS (깊이 우선 탐색)", "BFS (너비 우선 탐색)"], horizontal=True)
+            algo_choice = st.radio("탐색 알고리즘 선택", ["DFS (깊이 우선 탐색)", "BFS (너비 우선 탐색)"], horizontal=True, key="t1_algo")
         with col_ctrl2:
             start_station = st.selectbox("출발역 선택", stations, index=0, key="t1_start")
 
         # 스텝 트레이스 생성
         if "DFS" in algo_choice:
             steps = trace_dfs(graph, start_station)
-            badge_class = "badge-dfs"
-            badge_name = "DFS (스택 / LIFO)"
-            ds_label = "📦 현재 스택 (Stack) 상태 [맨 뒤가 TOP]"
         else:
             steps = trace_bfs(graph, start_station)
-            badge_class = "badge-bfs"
-            badge_name = "BFS (큐 / FIFO)"
-            ds_label = "🚶 현재 큐 (Queue) 상태 [맨 앞이 FRONT]"
 
-        with col_ctrl3:
-            step_idx = st.slider("단계(Step) 이동", 0, len(steps) - 1, 0, key="t1_slider")
+        total_steps = len(steps)
 
-        current_step = steps[step_idx]
+        # 세션 상태 초기화 및 슬라이더 키 관리
+        state_key = f"step_idx_t1_{algo_choice}_{start_station}"
+        if state_key not in st.session_state:
+            st.session_state[state_key] = 0
 
-        # 상태 안내 배지 및 설명
-        st.markdown(
-            f'<span class="algo-badge {badge_class}">{badge_name}</span> <b>단계 {step_idx} / {len(steps)-1}</b>: '
-            f'{current_step["action"]}',
-            unsafe_allow_html=True
-        )
-
-        # 2열 분할 레이아웃 (그래프 vs 자료구조 상태)
-        col_g, col_ds = st.columns([7, 5])
-
-        with col_g:
-            cur_node = current_step.get("current")
-            vis_nodes = current_step.get("visited", [])
-            ds_items = current_step.get("stack") if "DFS" in algo_choice else current_step.get("queue")
-            hl_edges = current_step.get("highlight_edges", [])
-
-            fig = create_graph_figure(
-                graph=graph,
-                weighted_map=weighted_map,
-                highlight_nodes=vis_nodes,
-                current_node=cur_node,
-                highlight_edges=hl_edges,
-                queue_or_stack_nodes=ds_items,
-                start_node=start_station,
-                title=f"{algo_choice} 탐색 진행도 (현재: {cur_node or '대기'})"
+        # 애니메이션 컨트롤 바
+        st.markdown("##### 🎬 탐색 애니메이션 컨트롤러")
+        c_btn1, c_btn2, c_btn3, c_btn4, c_speed = st.columns([1.5, 1.2, 1.2, 1.3, 3.5])
+        
+        with c_btn1:
+            play_clicked = st.button("▶️ 자동 재생", key="t1_play", use_container_width=True, type="primary")
+        with c_btn2:
+            if st.button("⏮️ 이전", key="t1_prev", use_container_width=True):
+                st.session_state[state_key] = max(0, st.session_state[state_key] - 1)
+        with c_btn3:
+            if st.button("⏭️ 다음", key="t1_next", use_container_width=True):
+                st.session_state[state_key] = min(total_steps - 1, st.session_state[state_key] + 1)
+        with c_btn4:
+            if st.button("🔄 처음으로", key="t1_reset", use_container_width=True):
+                st.session_state[state_key] = 0
+        with c_speed:
+            anim_speed = st.select_slider(
+                "⏱️ 재생 속도",
+                options=[0.2, 0.4, 0.7, 1.0, 1.5, 2.0],
+                value=0.7,
+                format_func=lambda s: f"{s}초/단계",
+                key="t1_speed"
             )
-            st.plotly_chart(fig, use_container_width=True)
 
-        with col_ds:
-            st.markdown(f"#### {ds_label}")
-            if ds_items:
-                ds_str = " ➔ ".join([f"[{item}]" for item in ds_items])
-                st.markdown(f'<div class="ds-box">{ds_str}</div>', unsafe_allow_html=True)
-                if "DFS" in algo_choice:
-                    st.caption(f"👉 다음 꺼낼 역: **`{ds_items[-1]}`** (`stack.pop()` 실행)")
-                else:
-                    st.caption(f"👉 다음 꺼낼 역: **`{ds_items[0]}`** (`queue.pop(0)` 실행)")
+        # 수동 슬라이더
+        slider_val = st.slider(
+            "직접 단계 이동 (Step Slider)",
+            0, total_steps - 1,
+            value=st.session_state[state_key],
+            key=f"slider_{state_key}"
+        )
+        st.session_state[state_key] = slider_val
+
+        # 동적 렌더링 컨테이너
+        display_placeholder = st.empty()
+
+        # 자동 재생 루프 실행
+        if play_clicked:
+            start_from = st.session_state[state_key]
+            # 이미 끝에 도달해 있다면 처음부터 재생
+            if start_from >= total_steps - 1:
+                start_from = 0
+
+            prog_bar = st.progress(0.0)
+            for idx in range(start_from, total_steps):
+                st.session_state[state_key] = idx
+                prog_bar.progress((idx + 1) / total_steps)
+                with display_placeholder.container():
+                    render_traversal_step(
+                        step=steps[idx],
+                        total_steps=total_steps,
+                        algo_choice=algo_choice,
+                        graph=graph,
+                        weighted_map=weighted_map,
+                        start_station=start_station,
+                        layout_mode=selected_layout_mode
+                    )
+                time.sleep(anim_speed)
+            prog_bar.empty()
+        else:
+            with display_placeholder.container():
+                render_traversal_step(
+                    step=steps[st.session_state[state_key]],
+                    total_steps=total_steps,
+                    algo_choice=algo_choice,
+                    graph=graph,
+                    weighted_map=weighted_map,
+                    start_station=start_station,
+                    layout_mode=selected_layout_mode
+                )
+
+        # 핵심 포인트 교육 카드
+        with st.expander("💡 핵심 탐색 원리 보기", expanded=False):
+            if "DFS" in algo_choice:
+                st.markdown("""
+                - **LIFO (Last In First Out)**: 가장 최근에 스택에 넣은 이웃역을 바로 깊게 파고듭니다.
+                - `stack.pop()`으로 맨 뒤 요소를 꺼냅니다.
+                - 작은 번호나 특정 순서로 방문하기 위해 `reversed()`로 스택에 넣습니다.
+                """)
             else:
-                st.markdown('<div class="ds-box">(비어 있음)</div>', unsafe_allow_html=True)
-
-            st.markdown("#### 🏁 방문 순서 (Visited)")
-            if vis_nodes:
-                vis_str = " ➔ ".join([f"**{i+1}. {stn}**" for i, stn in enumerate(vis_nodes)])
-                st.markdown(f'<div class="step-log">{vis_str}</div>', unsafe_allow_html=True)
-            else:
-                st.markdown('<div class="step-log">(아직 방문한 역 없음)</div>', unsafe_allow_html=True)
-
-            # 핵심 포인트 교육 카드
-            with st.expander("💡 핵심 탐색 원리 보기", expanded=True):
-                if "DFS" in algo_choice:
-                    st.markdown("""
-                    - **LIFO (Last In First Out)**: 가장 최근에 스택에 넣은 이웃역을 바로 깊게 파고듭니다.
-                    - `stack.pop()`으로 맨 뒤 요소를 꺼냅니다.
-                    - 작은 번호나 특정 순서로 방문하기 위해 `reversed()`로 스택에 넣습니다.
-                    """)
-                else:
-                    st.markdown("""
-                    - **FIFO (First In First Out)**: 가장 먼저 들어온 역부터 차례대로 방문하여 물결처럼 퍼져나갑니다.
-                    - `queue.pop(0)`으로 맨 앞 요소를 꺼냅니다.
-                    - 모든 간선의 가중치가 같을 때 최단 환승 경로를 보장합니다.
-                    """)
+                st.markdown("""
+                - **FIFO (First In First Out)**: 가장 먼저 들어온 역부터 차례대로 방문하여 물결처럼 퍼져나갑니다.
+                - `queue.pop(0)`으로 맨 앞 요소를 꺼냅니다.
+                - 모든 간선의 가중치가 같을 때 최단 환승 경로를 보장합니다.
+                """)
 
     # ==========================================================================
-    # TAB 2: 다익스트라 최단 경로 시뮬레이터
+    # TAB 2: 다익스트라 최단 경로 시뮬레이터 (애니메이션 지원)
     # ==========================================================================
     with tab2:
         st.subheader("⚡ 다익스트라(Dijkstra) 최단 경로 시뮬레이션")
-        st.caption("소요 시간(가중치)이 서로 다른 네트워크에서 가장 빠른 최단 경로와 소요 시간을 계산합니다.")
+        st.caption("소요 시간(가중치)이 서로 다른 네트워크에서 가장 빠른 최단 경로와 소요 시간을 애니메이션으로 관찰하세요.")
 
-        c_d1, c_d2, c_d3 = st.columns([2, 2, 4])
+        c_d1, c_d2 = st.columns([3, 3])
         with c_d1:
             d_start = st.selectbox("출발역", stations, index=0, key="t2_start")
         with c_d2:
@@ -723,55 +925,84 @@ subway_weighted_map = {
             d_end = st.selectbox("도착역", stations, index=default_end_idx, key="t2_end")
 
         d_steps, d_final_path, d_total_time = trace_dijkstra(weighted_map, d_start, d_end)
+        d_total_steps = len(d_steps)
 
-        with c_d3:
-            d_step_idx = st.slider("다익스트라 단계(Step) 이동", 0, len(d_steps) - 1, len(d_steps) - 1, key="t2_slider")
+        # 세션 상태 초기화
+        d_state_key = f"step_idx_t2_{d_start}_{d_end}"
+        if d_state_key not in st.session_state:
+            st.session_state[d_state_key] = d_total_steps - 1
 
-        d_current_step = d_steps[d_step_idx]
+        st.markdown("##### 🎬 다익스트라 탐색 애니메이션 컨트롤러")
+        cd_btn1, cd_btn2, cd_btn3, cd_btn4, cd_speed = st.columns([1.5, 1.2, 1.2, 1.3, 3.5])
 
-        st.markdown(
-            f'<span class="algo-badge badge-dijkstra">다익스트라</span> <b>단계 {d_step_idx} / {len(d_steps)-1}</b>: '
-            f'{d_current_step["action"]}',
-            unsafe_allow_html=True
-        )
-
-        col_dg, col_dt = st.columns([7, 5])
-
-        with col_dg:
-            is_last = (d_step_idx == len(d_steps) - 1)
-            hl_path = d_final_path if is_last else d_current_step["visited"]
-            hl_edges = [(d_final_path[i], d_final_path[i+1]) for i in range(len(d_final_path)-1)] if is_last and d_final_path else []
-
-            fig_d = create_graph_figure(
-                graph=graph,
-                weighted_map=weighted_map,
-                highlight_nodes=hl_path,
-                current_node=d_current_step["current"],
-                highlight_edges=hl_edges,
-                queue_or_stack_nodes=d_current_step.get("updated_stations", []),
-                start_node=d_start,
-                end_node=d_end,
-                title=f"다익스트라 최단 경로 탐색 ({d_start} ➔ {d_end})"
+        with cd_btn1:
+            d_play_clicked = st.button("▶️ 자동 재생", key="t2_play", use_container_width=True, type="primary")
+        with cd_btn2:
+            if st.button("⏮️ 이전", key="t2_prev", use_container_width=True):
+                st.session_state[d_state_key] = max(0, st.session_state[d_state_key] - 1)
+        with cd_btn3:
+            if st.button("⏭️ 다음", key="t2_next", use_container_width=True):
+                st.session_state[d_state_key] = min(d_total_steps - 1, st.session_state[d_state_key] + 1)
+        with cd_btn4:
+            if st.button("🔄 처음으로", key="t2_reset", use_container_width=True):
+                st.session_state[d_state_key] = 0
+        with cd_speed:
+            d_anim_speed = st.select_slider(
+                "⏱️ 재생 속도",
+                options=[0.2, 0.4, 0.7, 1.0, 1.5, 2.0],
+                value=0.7,
+                format_func=lambda s: f"{s}초/단계",
+                key="t2_speed"
             )
-            st.plotly_chart(fig_d, use_container_width=True)
 
-        with col_dt:
-            st.markdown("#### ⏱️ 역별 최소 소요 시간 (`times`) & 직전 역 (`previous`)")
-            
-            df_records = []
-            for stn in stations:
-                t_val = d_current_step["times"].get(stn, 999999)
-                t_str = f"{t_val}분" if t_val < 999999 else "∞ (미도달)"
-                prev_val = d_current_step["previous"].get(stn) or "-"
-                status = "🟢 확정(방문완료)" if stn in d_current_step["visited"] else ("🟡 이번 단계 갱신" if stn in d_current_step["updated_stations"] else "⚪ 미확정")
-                df_records.append({"지하철역": stn, "최소 시간": t_str, "직전 경유역": prev_val, "상태": status})
+        d_slider_val = st.slider(
+            "직접 단계 이동 (Dijkstra Step Slider)",
+            0, d_total_steps - 1,
+            value=st.session_state[d_state_key],
+            key=f"slider_{d_state_key}"
+        )
+        st.session_state[d_state_key] = d_slider_val
 
-            df = pd.DataFrame(df_records)
-            st.dataframe(df, hide_index=True, use_container_width=True)
+        d_display_placeholder = st.empty()
 
-            if is_last and d_final_path:
-                st.success(f"🎯 **최종 최단 경로:** {' ➔ '.join(d_final_path)} (총 **{d_total_time}분** 소요)")
-                st.info(f"💡 **역추적 원리:** 도착역 `{d_end}`에서부터 `previous` 딕셔너리를 거슬러 올라가 출발역 `{d_start}`까지 도달한 뒤 뒤집어(`reversed`) 경로를 구합니다.")
+        if d_play_clicked:
+            d_start_from = st.session_state[d_state_key]
+            if d_start_from >= d_total_steps - 1:
+                d_start_from = 0
+
+            d_prog_bar = st.progress(0.0)
+            for idx in range(d_start_from, d_total_steps):
+                st.session_state[d_state_key] = idx
+                d_prog_bar.progress((idx + 1) / d_total_steps)
+                with d_display_placeholder.container():
+                    render_dijkstra_step(
+                        step=d_steps[idx],
+                        total_steps=d_total_steps,
+                        d_start=d_start,
+                        d_end=d_end,
+                        d_final_path=d_final_path,
+                        d_total_time=d_total_time,
+                        graph=graph,
+                        weighted_map=weighted_map,
+                        stations=stations,
+                        layout_mode=selected_layout_mode
+                    )
+                time.sleep(d_anim_speed)
+            d_prog_bar.empty()
+        else:
+            with d_display_placeholder.container():
+                render_dijkstra_step(
+                    step=d_steps[st.session_state[d_state_key]],
+                    total_steps=d_total_steps,
+                    d_start=d_start,
+                    d_end=d_end,
+                    d_final_path=d_final_path,
+                    d_total_time=d_total_time,
+                    graph=graph,
+                    weighted_map=weighted_map,
+                    stations=stations,
+                    layout_mode=selected_layout_mode
+                )
 
     # ==========================================================================
     # TAB 3: DFS vs BFS 동시 비교
@@ -799,7 +1030,8 @@ subway_weighted_map = {
                 highlight_nodes=dfs_result,
                 highlight_edges=dfs_edges,
                 start_node=cmp_start,
-                title=f"DFS 탐색 경로 (깊게 전진)"
+                title=f"DFS 탐색 경로 (깊게 전진)",
+                layout_mode=selected_layout_mode
             )
             st.plotly_chart(fig_dfs, use_container_width=True)
             st.markdown("""
@@ -820,7 +1052,8 @@ subway_weighted_map = {
                 highlight_nodes=bfs_result,
                 highlight_edges=bfs_edges,
                 start_node=cmp_start,
-                title=f"BFS 탐색 경로 (넓게 번짐)"
+                title=f"BFS 탐색 경로 (넓게 번짐)",
+                layout_mode=selected_layout_mode
             )
             st.plotly_chart(fig_bfs, use_container_width=True)
             st.markdown("""
@@ -838,7 +1071,6 @@ subway_weighted_map = {
 
         st.info("💡 아래 슬라이더로 특정 구간의 소요 시간을 늘리거나 줄여보세요. 다익스트라 최단 경로가 실시간으로 다른 노선으로 우회합니다.")
 
-        # 모든 간선 목록 추출
         all_edges = []
         for u, neighbors in weighted_map.items():
             for item in neighbors:
@@ -860,7 +1092,6 @@ subway_weighted_map = {
                 custom_weights[(u, v)] = new_w
                 custom_weights[(v, u)] = new_w
 
-            # 가중치 맵 업데이트
             mod_weighted_map = {}
             for u, neighbors in weighted_map.items():
                 mod_neighbors = []
@@ -888,7 +1119,8 @@ subway_weighted_map = {
                 highlight_edges=sc_edges,
                 start_node=sc_start,
                 end_node=sc_end,
-                title=f"우회 시뮬레이션 최단 경로 ({sc_start} ➔ {sc_end})"
+                title=f"우회 시뮬레이션 최단 경로 ({sc_start} ➔ {sc_end})",
+                layout_mode=selected_layout_mode
             )
             st.plotly_chart(fig_sc, use_container_width=True)
 
