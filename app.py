@@ -596,9 +596,9 @@ def create_graph_figure(
 
 
 # ------------------------------------------------------------------------------
-# 7. 단일 스텝 뷰 렌더링 헬퍼 함수
+# 7. 단일 스텝 뷰 렌더링 헬퍼 함수 (StreamlitDuplicateElementId 방지 고유 Key 적용)
 # ------------------------------------------------------------------------------
-def render_traversal_step(step, total_steps, algo_choice, graph, weighted_map, start_station, layout_mode):
+def render_traversal_step(step, total_steps, algo_choice, graph, weighted_map, start_station, layout_mode, chart_key="t1_chart"):
     """DFS / BFS의 단일 스텝에 대한 상태 배지, 그래프, 자료구조 뷰를 렌더링"""
     badge_class = "badge-dfs" if "DFS" in algo_choice else "badge-bfs"
     badge_name = "DFS (스택 / LIFO)" if "DFS" in algo_choice else "BFS (큐 / FIFO)"
@@ -629,7 +629,7 @@ def render_traversal_step(step, total_steps, algo_choice, graph, weighted_map, s
             title=f"{algo_choice} 탐색 진행도 (현재: {cur_node or '대기'})",
             layout_mode=layout_mode
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key=chart_key)
 
     with col_ds:
         st.markdown(f"#### {ds_label}")
@@ -651,7 +651,7 @@ def render_traversal_step(step, total_steps, algo_choice, graph, weighted_map, s
             st.markdown('<div class="step-log">(아직 방문한 역 없음)</div>', unsafe_allow_html=True)
 
 
-def render_dijkstra_step(step, total_steps, d_start, d_end, d_final_path, d_total_time, graph, weighted_map, stations, layout_mode):
+def render_dijkstra_step(step, total_steps, d_start, d_end, d_final_path, d_total_time, graph, weighted_map, stations, layout_mode, chart_key="t2_chart", df_key="t2_df"):
     """다익스트라 단일 스텝에 대한 상태 배지, 그래프, 테이블 뷰를 렌더링"""
     step_idx = step["step_num"]
     is_last = (step_idx == total_steps - 1)
@@ -680,7 +680,7 @@ def render_dijkstra_step(step, total_steps, d_start, d_end, d_final_path, d_tota
             title=f"다익스트라 최단 경로 탐색 ({d_start} ➔ {d_end})",
             layout_mode=layout_mode
         )
-        st.plotly_chart(fig_d, use_container_width=True)
+        st.plotly_chart(fig_d, use_container_width=True, key=chart_key)
 
     with col_dt:
         st.markdown("#### ⏱️ 역별 최소 소요 시간 (`times`) & 직전 역 (`previous`)")
@@ -693,7 +693,7 @@ def render_dijkstra_step(step, total_steps, d_start, d_end, d_final_path, d_tota
             df_records.append({"지하철역": stn, "최소 시간": t_str, "직전 경유역": prev_val, "상태": status})
 
         df = pd.DataFrame(df_records)
-        st.dataframe(df, hide_index=True, use_container_width=True)
+        st.dataframe(df, hide_index=True, use_container_width=True, key=df_key)
 
         if is_last and d_final_path:
             st.success(f"🎯 **최종 최단 경로:** {' ➔ '.join(d_final_path)} (총 **{d_total_time}분** 소요)")
@@ -863,11 +863,11 @@ subway_weighted_map = {
         # 자동 재생 루프 실행
         if play_clicked:
             start_from = st.session_state[state_key]
-            # 이미 끝에 도달해 있다면 처음부터 재생
             if start_from >= total_steps - 1:
                 start_from = 0
 
             prog_bar = st.progress(0.0)
+            anim_timestamp = time.time()
             for idx in range(start_from, total_steps):
                 st.session_state[state_key] = idx
                 prog_bar.progress((idx + 1) / total_steps)
@@ -879,7 +879,8 @@ subway_weighted_map = {
                         graph=graph,
                         weighted_map=weighted_map,
                         start_station=start_station,
-                        layout_mode=selected_layout_mode
+                        layout_mode=selected_layout_mode,
+                        chart_key=f"t1_chart_anim_{idx}_{anim_timestamp}"
                     )
                 time.sleep(anim_speed)
             prog_bar.empty()
@@ -892,7 +893,8 @@ subway_weighted_map = {
                     graph=graph,
                     weighted_map=weighted_map,
                     start_station=start_station,
-                    layout_mode=selected_layout_mode
+                    layout_mode=selected_layout_mode,
+                    chart_key=f"t1_chart_static_{st.session_state[state_key]}"
                 )
 
         # 핵심 포인트 교육 카드
@@ -971,6 +973,7 @@ subway_weighted_map = {
                 d_start_from = 0
 
             d_prog_bar = st.progress(0.0)
+            d_anim_timestamp = time.time()
             for idx in range(d_start_from, d_total_steps):
                 st.session_state[d_state_key] = idx
                 d_prog_bar.progress((idx + 1) / d_total_steps)
@@ -985,7 +988,9 @@ subway_weighted_map = {
                         graph=graph,
                         weighted_map=weighted_map,
                         stations=stations,
-                        layout_mode=selected_layout_mode
+                        layout_mode=selected_layout_mode,
+                        chart_key=f"t2_chart_anim_{idx}_{d_anim_timestamp}",
+                        df_key=f"t2_df_anim_{idx}_{d_anim_timestamp}"
                     )
                 time.sleep(d_anim_speed)
             d_prog_bar.empty()
@@ -1001,7 +1006,9 @@ subway_weighted_map = {
                     graph=graph,
                     weighted_map=weighted_map,
                     stations=stations,
-                    layout_mode=selected_layout_mode
+                    layout_mode=selected_layout_mode,
+                    chart_key=f"t2_chart_static_{st.session_state[d_state_key]}",
+                    df_key=f"t2_df_static_{st.session_state[d_state_key]}"
                 )
 
     # ==========================================================================
@@ -1033,7 +1040,7 @@ subway_weighted_map = {
                 title=f"DFS 탐색 경로 (깊게 전진)",
                 layout_mode=selected_layout_mode
             )
-            st.plotly_chart(fig_dfs, use_container_width=True)
+            st.plotly_chart(fig_dfs, use_container_width=True, key="t3_dfs_chart")
             st.markdown("""
             **특징:**
             - 막다른 길이 나올 때까지 끝까지 파고든 후 되돌아옵니다 (Backtracking).
@@ -1055,7 +1062,7 @@ subway_weighted_map = {
                 title=f"BFS 탐색 경로 (넓게 번짐)",
                 layout_mode=selected_layout_mode
             )
-            st.plotly_chart(fig_bfs, use_container_width=True)
+            st.plotly_chart(fig_bfs, use_container_width=True, key="t3_bfs_chart")
             st.markdown("""
             **특징:**
             - 출발역에서 1정거장 거리 ➔ 2정거장 거리 순으로 동심원을 그리며 퍼져나갑니다.
@@ -1122,7 +1129,7 @@ subway_weighted_map = {
                 title=f"우회 시뮬레이션 최단 경로 ({sc_start} ➔ {sc_end})",
                 layout_mode=selected_layout_mode
             )
-            st.plotly_chart(fig_sc, use_container_width=True)
+            st.plotly_chart(fig_sc, use_container_width=True, key="t4_scenario_chart")
 
     # ==========================================================================
     # TAB 5: 코드 및 개념 학습장
