@@ -205,33 +205,36 @@ def parse_python_graph_code(code_str: str):
 # 5. 단계별(Step-by-Step) 알고리즘 트래커
 # ------------------------------------------------------------------------------
 def trace_dfs(graph, start_station):
-    """DFS의 각 단계(Stack 상태, 방문 노드, 현재 노드)를 기록"""
+    """DFS의 각 단계(Stack 상태, 방문 노드, 현재 노드, 탐색 트리 간선)를 기록"""
     steps = []
     visited = []
-    stack = [start_station]
+    # 스택에 (역 이름, 부모 역 이름) 튜플 저장하여 실제 이동한 간선 추적
+    stack = [(start_station, None)]
+    tree_edges = []
 
-    # 초기 상태
     steps.append({
         "step_num": 0,
         "current": None,
         "action": f"탐색 시작: 출발역 '{start_station}'을 스택에 푸시",
-        "stack": list(stack),
+        "stack": [start_station],
         "visited": list(visited),
         "highlight_edges": []
     })
 
     while stack:
-        current = stack.pop()
+        current, parent_node = stack.pop()
         
         if current not in visited:
             visited.append(current)
+            if parent_node is not None:
+                tree_edges.append((parent_node, current))
+
             action_desc = f"스택에서 pop() -> 현재 역 '{current}' 방문 처리"
             
-            # 자식 노드 push 과정
             added_neighbors = []
             for neighbor in reversed(graph.get(current, [])):
                 if neighbor not in visited:
-                    stack.append(neighbor)
+                    stack.append((neighbor, current))
                     added_neighbors.append(neighbor)
             
             if added_neighbors:
@@ -241,18 +244,18 @@ def trace_dfs(graph, start_station):
                 "step_num": len(steps),
                 "current": current,
                 "action": action_desc,
-                "stack": list(stack),
+                "stack": [s for s, _ in stack],
                 "visited": list(visited),
-                "highlight_edges": [(visited[i], visited[i+1]) for i in range(len(visited)-1)]
+                "highlight_edges": list(tree_edges)
             })
         else:
             steps.append({
                 "step_num": len(steps),
                 "current": current,
                 "action": f"스택에서 pop() -> '{current}'은 이미 방문함 (건너뜀)",
-                "stack": list(stack),
+                "stack": [s for s, _ in stack],
                 "visited": list(visited),
-                "highlight_edges": [(visited[i], visited[i+1]) for i in range(len(visited)-1)]
+                "highlight_edges": list(tree_edges)
             })
 
     steps.append({
@@ -261,16 +264,19 @@ def trace_dfs(graph, start_station):
         "action": f"탐색 완료: 스택이 비었습니다. 총 {len(visited)}개 역 방문 완료!",
         "stack": [],
         "visited": list(visited),
-        "highlight_edges": [(visited[i], visited[i+1]) for i in range(len(visited)-1)]
+        "highlight_edges": list(tree_edges)
     })
     return steps
 
 
 def trace_bfs(graph, start_station):
-    """BFS의 각 단계(Queue 상태, 방문 노드, 현재 노드)를 기록"""
+    """BFS의 각 단계(Queue 상태, 방문 노드, 현재 노드, 탐색 트리 간선)를 기록"""
     steps = []
     visited = []
     queue = [start_station]
+    # 각 역을 처음 발견한 부모 역을 기록하여 실제 방문 간선(Tree Edge) 추적
+    parent_map = {start_station: None}
+    tree_edges = []
 
     steps.append({
         "step_num": 0,
@@ -286,12 +292,17 @@ def trace_bfs(graph, start_station):
 
         if current not in visited:
             visited.append(current)
+            # 부모 노드가 있으면 실제 탐색 간선으로 추가 (예: 시청 -> 용산)
+            if parent_map.get(current) is not None:
+                tree_edges.append((parent_map[current], current))
+
             action_desc = f"큐의 맨 앞에서 pop(0) -> 현재 역 '{current}' 방문 처리"
             
             added_neighbors = []
             for neighbor in graph.get(current, []):
                 if neighbor not in visited and neighbor not in queue:
                     queue.append(neighbor)
+                    parent_map[neighbor] = current  # neighbor의 부모는 current
                     added_neighbors.append(neighbor)
 
             if added_neighbors:
@@ -303,7 +314,7 @@ def trace_bfs(graph, start_station):
                 "action": action_desc,
                 "queue": list(queue),
                 "visited": list(visited),
-                "highlight_edges": [(visited[i], visited[i+1]) for i in range(len(visited)-1)]
+                "highlight_edges": list(tree_edges)
             })
         else:
             steps.append({
@@ -312,7 +323,7 @@ def trace_bfs(graph, start_station):
                 "action": f"큐에서 pop(0) -> '{current}'은 이미 방문함 (건너뜀)",
                 "queue": list(queue),
                 "visited": list(visited),
-                "highlight_edges": [(visited[i], visited[i+1]) for i in range(len(visited)-1)]
+                "highlight_edges": list(tree_edges)
             })
 
     steps.append({
@@ -321,7 +332,7 @@ def trace_bfs(graph, start_station):
         "action": f"탐색 완료: 큐가 비었습니다. 총 {len(visited)}개 역 방문 완료!",
         "queue": [],
         "visited": list(visited),
-        "highlight_edges": [(visited[i], visited[i+1]) for i in range(len(visited)-1)]
+        "highlight_edges": list(tree_edges)
     })
     return steps
 
@@ -1020,8 +1031,13 @@ subway_weighted_map = {
 
         cmp_start = st.selectbox("비교할 출발역 선택", stations, index=0, key="t3_start")
 
-        dfs_result = trace_dfs(graph, cmp_start)[-1]["visited"]
-        bfs_result = trace_bfs(graph, cmp_start)[-1]["visited"]
+        dfs_trace = trace_dfs(graph, cmp_start)[-1]
+        dfs_result = dfs_trace["visited"]
+        dfs_edges = dfs_trace["highlight_edges"]
+
+        bfs_trace = trace_bfs(graph, cmp_start)[-1]
+        bfs_result = bfs_trace["visited"]
+        bfs_edges = bfs_trace["highlight_edges"]
 
         col_c1, col_c2 = st.columns(2)
 
@@ -1030,7 +1046,6 @@ subway_weighted_map = {
             st.markdown('<span class="algo-badge badge-dfs">자료구조: 스택 (LIFO)</span>', unsafe_allow_html=True)
             st.write(f"**방문 순서:** {' ➔ '.join(dfs_result)}")
             
-            dfs_edges = [(dfs_result[i], dfs_result[i+1]) for i in range(len(dfs_result)-1)]
             fig_dfs = create_graph_figure(
                 graph=graph,
                 weighted_map=weighted_map,
@@ -1052,7 +1067,6 @@ subway_weighted_map = {
             st.markdown('<span class="algo-badge badge-bfs">자료구조: 큐 (FIFO)</span>', unsafe_allow_html=True)
             st.write(f"**방문 순서:** {' ➔ '.join(bfs_result)}")
 
-            bfs_edges = [(bfs_result[i], bfs_result[i+1]) for i in range(len(bfs_result)-1)]
             fig_bfs = create_graph_figure(
                 graph=graph,
                 weighted_map=weighted_map,
